@@ -1,8 +1,6 @@
-# Mengabaikan folder virtual environment
 .venv/
 venv/
 serviceAccountKey.json
-
-# Environment variables
+example.http
 .env
 .env.*

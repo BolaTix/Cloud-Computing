@@ -4,446 +4,638 @@ import pandas as pd
 import numpy as np
 import os
 import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import firestore
+from firebase_admin import credentials, firestore
 from functools import wraps
 import jwt
 from datetime import datetime, timedelta
 import bcrypt
 from dotenv import load_dotenv
 import secrets
+from google.cloud import storage
+import uuid
+from werkzeug.utils import secure_filename
 
-# Load environment variables
+# Load environment variables and initialize app
 load_dotenv()
-
-# Initialize Flask application
 app = Flask(__name__)
 
-# Get secret key from environment or generate a secure one
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
-if not app.config['SECRET_KEY']:
-    # Generate a secure secret key if not in environment
-    app.config['SECRET_KEY'] = secrets.token_hex(32)
-    # Save it to .env file
+# Configure secret key
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY') or secrets.token_hex(32)
+if not os.getenv('SECRET_KEY'):
     with open('.env', 'a') as f:
         f.write(f"\nSECRET_KEY={app.config['SECRET_KEY']}")
 
-# Initialize Firebase based on environment
-def initialize_firebase():
-    """Initialize Firebase with appropriate credentials"""
-    try:
-        # For Cloud Run, this will use the default credentials
-        firebase_admin.initialize_app(options={
-            'projectId': 'bolatix-test'
-        })
-    except Exception as e:
-        # Fallback to service account file for local development
-        cred = credentials.Certificate('serviceAccountKey.json')
-        firebase_admin.initialize_app(cred)
-    print("Firebase initialized successfully")
-
-# Initialize Firebase and get Firestore client
-initialize_firebase()
+# Initialize Firebase
+try:
+    firebase_admin.initialize_app(options={'projectId': 'bolatix-test'})
+except Exception:
+    cred = credentials.Certificate('serviceAccountKey.json')
+    firebase_admin.initialize_app(cred)
 db = firestore.client()
+
+# Initialize Google Cloud Storage client
+storage_client = storage.Client(project='bolatix-test')
+BUCKET_NAME = 'bolatix-user-profiles'
+bucket = storage_client.bucket(BUCKET_NAME)
+
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def upload_profile_picture(file, user_id):
+    if not file or not allowed_file(file.filename):
+        return None
+        
+    # Create a unique filename
+    original_extension = file.filename.rsplit('.', 1)[1].lower()
+    filename = f"profile_pictures/{user_id}/{str(uuid.uuid4())}.{original_extension}"
+    
+    # Upload to Google Cloud Storage
+    blob = bucket.blob(filename)
+    blob.upload_from_string(
+        file.read(),
+        content_type=file.content_type
+    )
+    
+    # Make the blob publicly readable
+    blob.make_public()
+    
+    return blob.public_url
 
 # Model and dataset paths
 HISTORY_MODEL_PATH = "models/history.h5"
 COLDSTART_MODEL_PATH = "models/cold_start.h5"
 DATASET_PATH = "data/dataset.csv"
 
-# Check availability of models and dataset
-USE_DUMMY = not (os.path.exists(HISTORY_MODEL_PATH) and
-                os.path.exists(COLDSTART_MODEL_PATH) and
-                os.path.exists(DATASET_PATH))
+# Check model and dataset availability
+USE_DUMMY = not all(os.path.exists(path) for path in [HISTORY_MODEL_PATH, COLDSTART_MODEL_PATH, DATASET_PATH])
+
+# Load dataset globally
+try:
+    dataset = pd.read_csv(DATASET_PATH)
+except Exception as e:
+    print(f"Error loading dataset: {e}")
+    dataset = pd.DataFrame()
 
 if not USE_DUMMY:
-    # Load models
     try:
         model_history = tf.keras.models.load_model(HISTORY_MODEL_PATH)
         model_coldstart = tf.keras.models.load_model(COLDSTART_MODEL_PATH)
-        print("Models loaded successfully")
     except Exception as e:
         print(f"Error loading models: {e}")
         USE_DUMMY = True
 
-    # Load match dataset
-    dataset = pd.read_csv(DATASET_PATH)
-
 def get_user_data(user_id):
-    """Get user data from Firestore"""
-    user_ref = db.collection('users').document(user_id)
-    user = user_ref.get()
-    if user.exists:
-        return user.to_dict()
-    return None
-
-def user_has_history(user_id):
-    """Check if user has ticket purchase history"""
-    user_data = get_user_data(user_id)
-    if user_data:
-        return len(user_data.get('purchase_history', [])) > 0
-    return False
-
-def get_recommendations_history(user_id):
-    """Generate recommendations based on user's purchase history using ML model"""
-    user_data = get_user_data(user_id)
-    if not user_data:
-        return []
-
-    purchase_history = user_data.get('purchase_history', [])
-    if not purchase_history:
-        return []
-
-    # Find matches involving teams from purchase history
-    relevant_teams = set()
-    for purchase in purchase_history:
-        home_team, away_team = purchase['match'].split(" vs ")
-        relevant_teams.add(home_team)
-        relevant_teams.add(away_team)
-
-    # Use ML model for recommendations
-    if USE_DUMMY:
-        # Fallback to simple recommendation if model not available
-        recommendations = []
-        for _, match in dataset.iterrows():
-            if match['Home'].strip() in relevant_teams or match['Away'].strip() in relevant_teams:
-                recommendations.append({
-                    "match": match['Match'],
-                    "home_team": match['Home'].strip(),
-                    "away_team": match['Away'].strip(),
-                    "lokasi": match['Lokasi'],
-                    "jam": match['Jam'].rsplit(':', 1)[0],
-                    "waktu": match['Waktu'],
-                    "stadion": match['Stadion'],
-                    "hari": match['Hari'],
-                    "tanggal": match['Tanggal'],
-                    "tiket_terjual": int(match['Jumlah Tiket Terjual']),
-                    "suggested_action": "Consider buying tickets"
-                })
-        return recommendations[:10]
-    else:
-        # Use ML model for recommendations
-        # Implement your ML model prediction logic here
-        return process_predictions(model_history.predict(user_data))
-
-def get_recommendations_new_user(favorite_team):
-    """Generate recommendations for new users based on their favorite team"""
-    if USE_DUMMY:
-        # Simple recommendation based on favorite team
-        recommendations = []
-        for _, match in dataset.iterrows():
-            if favorite_team in [match['Home'].strip(), match['Away'].strip()]:
-                recommendations.append({
-                    "match": match['Match'],
-                    "home_team": match['Home'].strip(),
-                    "away_team": match['Away'].strip(),
-                    "lokasi": match['Lokasi'],
-                    "jam": match['Jam'].rsplit(':', 1)[0],
-                    "waktu": match['Waktu'],
-                    "stadion": match['Stadion'],
-                    "hari": match['Hari'],
-                    "tanggal": match['Tanggal'],
-                    "tiket_terjual": int(match['Jumlah Tiket Terjual']),
-                    "suggested_action": "New match for you!"
-                })
-        return recommendations[:10]
-    else:
-        # Use cold start model for recommendations
-        return process_predictions(model_coldstart.predict([favorite_team]))
+    doc = db.collection('users').document(user_id).get()
+    return doc.to_dict() if doc.exists else None
 
 def generate_token(user_id):
-    """Generate JWT token"""
     try:
-        # Token never expires (no 'exp' claim)
         payload = {
             'iat': datetime.utcnow(),
             'sub': user_id,
-            'type': 'persistent'  # Mark as persistent token
+            'type': 'persistent'
         }
-        return jwt.encode(
-            payload,
-            app.config['SECRET_KEY'],
-            algorithm='HS256'
-        )
-    except Exception as e:
+        return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+    except Exception:
         return None
 
 def verify_token(f):
     @wraps(f)
-    def decorated_function(*args, **kwargs):
-        token = None
-        
-        if 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
-            try:
-                token = auth_header.split(" ")[1]
-            except IndexError:
-                return jsonify({'error': 'Token is missing'}), 401
+    def decorated(*args, **kwargs):
+        auth_header = request.headers.get('Authorization', '')
+        token = auth_header.split(" ")[1] if len(auth_header.split()) > 1 else None
         
         if not token:
-            return jsonify({'error': 'Token is missing'}), 401
+            return jsonify({'status': False, 'message': 'Token is missing'}), 401
             
         try:
-            # Decode without expiration verification
-            payload = jwt.decode(
-                token, 
-                app.config['SECRET_KEY'],
-                algorithms=['HS256'],
-                options={"verify_exp": False}  # Don't verify expiration
-            )
+            payload = jwt.decode(token, app.config['SECRET_KEY'], 
+                               algorithms=['HS256'], options={"verify_exp": False})
             request.user_id = payload['sub']
             
-            # Check if token is marked as invalidated in Firestore
-            user_ref = db.collection('users').document(payload['sub'])
-            user_data = user_ref.get().to_dict()
-            
-            if user_data.get('token_invalidated_at'):
-                # Token was invalidated (user logged out)
-                return jsonify({'error': 'Token has been invalidated'}), 401
+            user_data = get_user_data(payload['sub'])
+            if user_data and user_data.get('token_invalidated_at'):
+                return jsonify({'status': False, 'message': 'Token has been invalidated'}), 401
                 
         except jwt.InvalidTokenError:
-            return jsonify({'error': 'Invalid token'}), 401
+            return jsonify({'status': False, 'message': 'Invalid token'}), 401
             
         return f(*args, **kwargs)
-    return decorated_function
+    return decorated
 
+def format_match_recommendation(match, action="Consider buying tickets"):
+    return {
+        "match": match['Match'],
+        "home_team": match['Home'].strip(),
+        "away_team": match['Away'].strip(),
+        "lokasi": match['Lokasi'],
+        "jam": match['Jam'].rsplit(':', 1)[0],
+        "waktu": match['Waktu'],
+        "stadion": match['Stadion'],
+        "hari": match['Hari'],
+        "tanggal": match['Tanggal'],
+        "tiket_terjual": int(match['Jumlah Tiket Terjual']),
+        "suggested_action": action
+    }
+
+def get_recommendations_history(user_id):
+    user_data = get_user_data(user_id)
+    if not user_data or not user_data.get('purchase_history'):
+        return []
+
+    relevant_teams = {team.strip() for purchase in user_data['purchase_history']
+                     for team in [purchase['home_team'], purchase['away_team']]}
+
+    if USE_DUMMY:
+        recommendations = [
+            format_match_recommendation(match)
+            for _, match in dataset.iterrows()
+            if match['Home'].strip() in relevant_teams or match['Away'].strip() in relevant_teams
+        ]
+        return recommendations
+    
+    return process_predictions(model_history.predict(user_data))
+
+def get_recommendations_new_user(favorite_team):
+    if USE_DUMMY:
+        recommendations = [
+            format_match_recommendation(match, "New match for you!")
+            for _, match in dataset.iterrows()
+            if favorite_team in [match['Home'].strip(), match['Away'].strip()]
+        ]
+        return recommendations[:10]
+    
+    return process_predictions(model_coldstart.predict([favorite_team]))
+
+def process_predictions(predictions):
+    """Process ML model prediction results into readable recommendation format"""
+    try:
+        if dataset.empty:
+            return []
+            
+        recommendations = []
+        for idx, score in enumerate(predictions[0]):
+            match = dataset.iloc[idx]
+            recommendations.append({
+                "id_match": str(match['ID Match']),
+                "home_team": match['Home'].strip(),
+                "away_team": match['Away'].strip(),
+                "tanggal": match['Tanggal'].strip(),
+                "jam": match['Jam'].rsplit(':', 1)[0],
+                "stadion": match['Stadion'],
+                "lokasi": match['Lokasi'],
+                "tiket_terjual": int(match['Jumlah Tiket Terjual']),
+                "score": float(score)
+            })
+        return sorted(recommendations, key=lambda x: x['score'], reverse=True)[:10]
+    except Exception as e:
+        print(f"Error processing predictions: {e}")
+        return []
+
+# API Endpoints
 @app.route('/api/auth/register', methods=['POST'])
 def register():
-    """Register a new user"""
     try:
         data = request.json
-        if not data or not data.get('email') or not data.get('password'):
-            return jsonify({'error': 'Email and password are required'}), 400
+        if not all(key in data for key in ['email', 'password']):
+            return jsonify({
+                'status': False,
+                'message': 'Email and password are required'
+            }), 400
             
-        # Check if user already exists
-        users_ref = db.collection('users')
-        existing_user = users_ref.where('email', '==', data['email']).get()
-        
-        if len(list(existing_user)) > 0:
-            return jsonify({'error': 'Email already registered'}), 409
+        existing = db.collection('users').where('email', '==', data['email']).get()
+        if len(list(existing)) > 0:
+            return jsonify({
+                'status': False,
+                'message': 'Email already registered'
+            }), 409
             
-        # Hash password
-        hashed = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
-        
-        # Create user document with profile data
         user_data = {
             'email': data['email'],
-            'password': hashed.decode('utf-8'),
-            'created_at': firestore.SERVER_TIMESTAMP,
+            'password': bcrypt.hashpw(data['password'].encode('utf-8'), 
+                                    bcrypt.gensalt()).decode('utf-8'),
             'name': data.get('name', ''),
             'favorite_team': data.get('favorite_team', ''),
-            'profile': data.get('profile', {}),
+            'birth_date': data.get('birth_date'),
+            'profile_picture': data.get('profile_picture', ''),
+            'purchase_history': []
+        }
+        
+        new_user_ref = db.collection('users').document()
+        
+        user_data_with_timestamps = {
+            **user_data,
+            'created_at': firestore.SERVER_TIMESTAMP,
             'updated_at': firestore.SERVER_TIMESTAMP
         }
+        new_user_ref.set(user_data_with_timestamps)
         
-        # Add user to Firestore
-        new_user_ref = users_ref.document()
-        new_user_ref.set(user_data)
-        
-        # Generate token
         token = generate_token(new_user_ref.id)
         
-        # Return response without sensitive data
-        response_data = {
-            'email': user_data['email'],
-            'name': user_data['name'],
-            'favorite_team': user_data['favorite_team'],
-            'profile': user_data['profile']
-        }
+        response_data = {k: v for k, v in user_data.items() 
+                        if k not in ['password']}
         
         return jsonify({
+            'status': True,
             'message': 'User registered successfully',
-            'token': token,
-            'user_id': new_user_ref.id,
-            'user': response_data
+            'data': {
+                'token': token,
+                'user_id': new_user_ref.id,
+                'user': response_data
+            }
         }), 201
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """Login user"""
     try:
         data = request.json
-        if not data or not data.get('email') or not data.get('password'):
-            return jsonify({'error': 'Email and password are required'}), 400
+        if not all(key in data for key in ['email', 'password']):
+            return jsonify({
+                'status': False,
+                'message': 'Email and password are required'
+            }), 400
             
-        # Find user
-        users_ref = db.collection('users')
-        user_docs = users_ref.where('email', '==', data['email']).get()
-        
-        if not user_docs:
-            return jsonify({'error': 'Invalid credentials'}), 401
+        users = list(db.collection('users').where('email', '==', data['email']).get())
+        if not users:
+            return jsonify({
+                'status': False,
+                'message': 'Invalid credentials'
+            }), 401
             
-        user_doc = list(user_docs)[0]
-        user_data = user_doc.to_dict()
+        user = users[0]
+        user_data = user.to_dict()
         
-        # Check password
-        if not bcrypt.checkpw(data['password'].encode('utf-8'), user_data['password'].encode('utf-8')):
-            return jsonify({'error': 'Invalid credentials'}), 401
+        if not bcrypt.checkpw(data['password'].encode('utf-8'), 
+                            user_data['password'].encode('utf-8')):
+            return jsonify({
+                'status': False,
+                'message': 'Invalid credentials'
+            }), 401
             
-        # Clear any previous token invalidation
-        user_doc.reference.update({
-            'token_invalidated_at': None
-        })
-        
-        # Generate new persistent token
-        token = generate_token(user_doc.id)
+        user.reference.update({'token_invalidated_at': None})
+        token = generate_token(user.id)
         
         return jsonify({
+            'status': True,
             'message': 'Login successful',
-            'token': token,
-            'user_id': user_doc.id
+            'data': {
+                'token': token,
+                'user_id': user.id
+            }
         }), 200
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
 
 @app.route('/api/auth/logout', methods=['POST'])
 @verify_token
 def logout():
-    """Logout user by invalidating their token"""
     try:
-        user_id = request.user_id
-        
-        # Mark token as invalidated in Firestore
-        user_ref = db.collection('users').document(user_id)
-        user_ref.update({
-            'token_invalidated_at': firestore.SERVER_TIMESTAMP
-        })
-        
+        user_ref = db.collection('users').document(request.user_id)
+        user_ref.update({'token_invalidated_at': firestore.SERVER_TIMESTAMP})
         return jsonify({
-            'message': 'Successfully logged out'
+            'status': True,
+            'message': 'Logout successful'
         }), 200
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
 
 @app.route('/api/users/<user_id>', methods=['GET'])
 @verify_token
 def read_user(user_id):
-    """Get user data by ID"""
     try:
-        # Verify user can only access their own data
-        if user_id != request.user_id:
-            return jsonify({'error': 'Unauthorized access'}), 403
+        if request.user_id != user_id:
+            return jsonify({
+                'status': False,
+                'message': 'Unauthorized access'
+            }), 403
             
         user_data = get_user_data(user_id)
-        if user_data:
-            # Remove sensitive data
-            if 'password' in user_data:
-                del user_data['password']
+        if not user_data:
             return jsonify({
-                'status': 'success',
-                'data': user_data
-            }), 200
-        return jsonify({'error': 'User not found'}), 404
+                'status': False,
+                'message': 'User not found'
+            }), 404
+            
+        user_data.pop('password', None)
+        return jsonify({
+            'status': True,
+            'message': 'User data retrieved successfully',
+            'data': user_data
+        }), 200
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
 
 @app.route('/api/users/<user_id>', methods=['PUT'])
 @verify_token
 def update_user(user_id):
-    """Update user data"""
     try:
-        if user_id != request.user_id:
-            return jsonify({'error': 'Unauthorized access'}), 403
+        if request.user_id != user_id:
+            return jsonify({
+                'status': False,
+                'message': 'Unauthorized access'
+            }), 403
             
         data = request.json
         if not data:
-            return jsonify({'error': 'No data provided'}), 400
+            return jsonify({
+                'status': False,
+                'message': 'No data provided for update'
+            }), 400
             
         user_ref = db.collection('users').document(user_id)
-        if not user_ref.get().exists:
-            return jsonify({'error': 'User not found'}), 404
-            
-        # Don't allow password update through this endpoint
-        if 'password' in data:
-            del data['password']
+        user_doc = user_ref.get()
         
-        # Update user data with timestamp
-        data['updated_at'] = firestore.SERVER_TIMESTAMP
-        user_ref.update(data)
-        
-        # Get updated user data
-        updated_data = user_ref.get().to_dict()
-        if 'password' in updated_data:
-            del updated_data['password']
+        if not user_doc.exists:
+            return jsonify({
+                'status': False,
+                'message': 'User not found'
+            }), 404
             
+        update_data = {}
+        allowed_fields = ['name', 'favorite_team', 'birth_date', 'profile_picture']
+        for field in allowed_fields:
+            if field in data:
+                update_data[field] = data[field]
+                
+        update_data_with_timestamp = {
+            **update_data,
+            'updated_at': firestore.SERVER_TIMESTAMP
+        }
+        
+        user_ref.update(update_data_with_timestamp)
+        
         return jsonify({
+            'status': True,
             'message': 'User updated successfully',
-            'data': updated_data
+            'data': update_data
         }), 200
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
 
 @app.route('/api/users/<user_id>', methods=['DELETE'])
 @verify_token
 def delete_user(user_id):
-    """Delete user"""
     try:
-        if user_id != request.user_id:
-            return jsonify({'error': 'Unauthorized access'}), 403
+        if request.user_id != user_id:
+            return jsonify({
+                'status': False,
+                'message': 'Unauthorized access'
+            }), 403
             
         user_ref = db.collection('users').document(user_id)
         if not user_ref.get().exists:
-            return jsonify({'error': 'User not found'}), 404
+            return jsonify({
+                'status': False,
+                'message': 'User not found'
+            }), 404
             
-        # Delete user
         user_ref.delete()
         return jsonify({
-            'status': 'success',
+            'status': True,
             'message': 'User deleted successfully'
         }), 200
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
 
-@app.route('/api/recommend', methods=['POST'])
+@app.route('/api/users/<user_id>/purchases', methods=['POST'])
+@verify_token
+def add_purchase(user_id):
+    try:
+        if request.user_id != user_id:
+            return jsonify({
+                'status': False,
+                'message': 'Unauthorized access'
+            }), 403
+            
+        data = request.json
+        required_fields = [
+            'match_id', 'home_team', 'away_team', 'stadium', 
+            'match_date', 'purchase_date', 'ticket_quantity'
+        ]
+        if not all(field in data for field in required_fields):
+            return jsonify({
+                'status': False,
+                'message': f'Required fields: {", ".join(required_fields)}'
+            }), 400
+            
+        user_ref = db.collection('users').document(user_id)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({
+                'status': False,
+                'message': 'User not found'
+            }), 404
+            
+        purchase = {
+            'match_id': data['match_id'],
+            'home_team': data['home_team'],
+            'away_team': data['away_team'],
+            'stadium': data['stadium'],
+            'match_date': data['match_date'],
+            'purchase_date': data['purchase_date'],
+            'ticket_quantity': data['ticket_quantity']
+        }
+        
+        user_ref.update({
+            'purchase_history': firestore.ArrayUnion([purchase])
+        })
+        
+        return jsonify({
+            'status': True,
+            'message': 'Purchase added to history successfully',
+            'data': purchase
+        }), 201
+        
+    except Exception as e:
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
+
+@app.route('/api/users/<user_id>/purchases', methods=['GET'])
+@verify_token
+def get_purchase_history(user_id):
+    try:
+        if request.user_id != user_id:
+            return jsonify({
+                'status': False,
+                'message': 'Unauthorized access'
+            }), 403
+            
+        user_ref = db.collection('users').document(user_id)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({
+                'status': False,
+                'message': 'User not found'
+            }), 404
+            
+        user_data = user_doc.to_dict()
+        purchase_history = user_data.get('purchase_history', [])
+        
+        return jsonify({
+            'status': True,
+            'message': 'Purchase history retrieved successfully',
+            'data': purchase_history
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
+
+@app.route('/api/recommend', methods=['GET'])
 @verify_token
 def recommend():
-    """Endpoint to get match recommendations"""
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-        user_id = data.get('user_id')
-        favorite_team = data.get('favorite_team')
-
-        if not user_id or not favorite_team:
-            return jsonify({"error": "user_id and favorite_team must be provided."}), 400
-
-        if user_has_history(user_id):
-            # User with purchase history
-            recommendations = get_recommendations_history(user_id)
+        user_data = get_user_data(request.user_id)
+        if not user_data:
+            return jsonify({
+                'status': False,
+                'message': 'User not found'
+            }), 404
+            
+        if USE_DUMMY:
+            favorite_team = user_data.get('favorite_team', '')
+            recommendations = [
+                format_match_recommendation(match)
+                for _, match in dataset.iterrows()
+                if favorite_team and (favorite_team in [match['Home'].strip(), match['Away'].strip()])
+            ][:10]
         else:
-            # New user without purchase history
-            recommendations = get_recommendations_new_user(favorite_team)
-
+            if user_data.get('purchase_history'):
+                predictions = model_history.predict([request.user_id])
+            else:
+                favorite_team = user_data.get('favorite_team')
+                if not favorite_team:
+                    return jsonify({
+                        'status': False,
+                        'message': 'Favorite team is required for recommendations'
+                    }), 400
+                predictions = model_coldstart.predict([[favorite_team]])
+                
+            recommendations = process_predictions(predictions)
+            
         return jsonify({
-            "status": "success",
-            "recommendations": recommendations
-        })
-
+            'status': True,
+            'message': 'Recommendations retrieved successfully',
+            'data': recommendations
+        }), 200
+        
     except Exception as e:
-        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+        print(f"Recommendation error: {e}")
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
 
-def process_predictions(predictions):
-    """Process ML model prediction results into readable recommendation format"""
-    recommendations = []
-    for idx, score in enumerate(predictions[0]):
-        match = dataset.iloc[idx]
-        recommendations.append({
-            "id_match": match['ID Match'],
-            "home_team": match['Home'].strip(),
-            "away_team": match['Away'].strip(),
-            "tanggal": match['Tanggal'].strip(),
-            "jam": match['Jam'].rsplit(':', 1)[0],
-            "stadion": match['Stadion'],
-            "lokasi": match['Lokasi'],
-            "tiket_terjual": match['Jumlah Tiket Terjual'],
-            "score": float(score)
+@app.route('/api/users/<user_id>/profile-picture', methods=['POST'])
+@verify_token
+def update_profile_picture(user_id):
+    try:
+        if request.user_id != user_id:
+            return jsonify({
+                'status': False,
+                'message': 'Unauthorized access'
+            }), 403
+            
+        if 'profile_picture' not in request.files:
+            return jsonify({
+                'status': False,
+                'message': 'No file provided'
+            }), 400
+            
+        file = request.files['profile_picture']
+        if file.filename == '':
+            return jsonify({
+                'status': False,
+                'message': 'No file selected'
+            }), 400
+            
+        if not allowed_file(file.filename):
+            return jsonify({
+                'status': False,
+                'message': f'File type not allowed. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}'
+            }), 400
+            
+        # Get user document
+        user_ref = db.collection('users').document(user_id)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({
+                'status': False,
+                'message': 'User not found'
+            }), 404
+            
+        # Delete old profile picture if exists
+        user_data = user_doc.to_dict()
+        old_picture_url = user_data.get('profile_picture')
+        if old_picture_url:
+            try:
+                old_blob_name = old_picture_url.split('/')[-1]
+                old_blob = bucket.blob(f"profile_pictures/{user_id}/{old_blob_name}")
+                old_blob.delete()
+            except Exception:
+                pass
+                
+        # Upload new profile picture
+        picture_url = upload_profile_picture(file, user_id)
+        if not picture_url:
+            return jsonify({
+                'status': False,
+                'message': 'Failed to upload profile picture'
+            }), 500
+            
+        # Update user document with new profile picture URL
+        user_ref.update({
+            'profile_picture': picture_url,
+            'updated_at': firestore.SERVER_TIMESTAMP
         })
-    return sorted(recommendations, key=lambda x: x['score'], reverse=True)[:10]
+        
+        return jsonify({
+            'status': True,
+            'message': 'Profile picture updated successfully',
+            'data': {
+                'profile_picture_url': picture_url
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
