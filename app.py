@@ -162,8 +162,16 @@ def verify_token(f):
     return decorated
 
 def format_match_recommendation(match, action="Consider buying tickets"):
+
+    home_score = match.get('Score Home', 0)  # Default to 0 if column is missing
+    away_score = match.get('Score Away', 0)  # Default to 0 if column is missing
+    
+    # Format the score as "Home Score - Away Score"
+    score = f"{home_score} - {away_score}"
+    
     return {
         "match": match['Match'],
+        "score": score,
         "home_team": match['Home'].strip(),
         "away_team": match['Away'].strip(),
         "lokasi": match['Lokasi'],
@@ -550,25 +558,53 @@ def get_purchase_history(user_id):
             'message': str(e)
         }), 500
 
-@app.route('/api/recommend', methods=['GET'])
+@app.route('/api/recommend-teamfavorite', methods=['GET'])
 @verify_token
-def recommend():
+def recommend_teamfavorite():
     try:
+        # Fetch user data
         user_data = get_user_data(request.user_id)
         if not user_data:
             return jsonify({
                 'status': False,
                 'message': 'User not found'
             }), 404
-            
+
+        today_date = datetime.today().date()  # Get today's date
+
+        # Dummy data processing
         if USE_DUMMY:
             favorite_team = user_data.get('favorite_team', '')
-            recommendations = [
-                format_match_recommendation(match)
-                for _, match in dataset.iterrows()
-                if favorite_team and (favorite_team in [match['Home'].strip(), match['Away'].strip()])
-            ][:10]
+            if not favorite_team:
+                return jsonify({
+                    'status': False,
+                    'message': 'Favorite team is required for dummy recommendations'
+                }), 400
+
+            # Convert favorite_team to lowercase for case-insensitive matching
+            favorite_team = favorite_team.lower()
+
+            recommendations = []
+            for _, match in dataset.iterrows():
+                match_date = None
+                try:
+                    match_date = datetime.strptime(match['Tanggal'], '%d/%m/%Y').date()
+                except ValueError:
+                    try:
+                        match_date = datetime.strptime(match['Tanggal'], '%d-%m-%Y').date()
+                    except ValueError:
+                        continue
+
+                # Convert team names to lowercase for case-insensitive matching
+                home_team = match['Home'].strip().lower()
+                away_team = match['Away'].strip().lower()
+
+                if favorite_team in [home_team, away_team] and match_date >= today_date:
+                    recommendations.append(format_match_recommendation(match))
+
+            recommendations = recommendations[:10]
         else:
+            # Predict recommendations based on user data
             if user_data.get('purchase_history'):
                 predictions = model_history.predict([request.user_id])
             else:
@@ -578,21 +614,120 @@ def recommend():
                         'status': False,
                         'message': 'Favorite team is required for recommendations'
                     }), 400
-                predictions = model_coldstart.predict([[favorite_team]])
                 
-            recommendations = process_predictions(predictions)
-            
+                predictions = model_coldstart.predict([[favorite_team]])
+
+            # Process predictions and filter by date
+            recommendations = []
+            for match in process_predictions(predictions):
+                match_date = None
+                try:
+                    match_date = datetime.strptime(match['tanggal'], '%d/%m/%Y').date()
+                except ValueError:
+                    try:
+                        match_date = datetime.strptime(match['tanggal'], '%d-%m-%Y').date()
+                    except ValueError:
+                        continue
+
+                if match_date >= today_date:
+                    recommendations.append(match)
+
+        # Ensure exactly 10 recommendations or fewer if not enough matches
+        recommendations = recommendations[:10]
+
         return jsonify({
             'status': True,
             'message': 'Recommendations retrieved successfully',
             'data': recommendations
         }), 200
-        
+
     except Exception as e:
+        # Log and return the error
         print(f"Recommendation error: {e}")
         return jsonify({
             'status': False,
-            'message': str(e)
+            'message': 'An error occurred while retrieving recommendations',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/recommend-history', methods=['GET'])
+@verify_token
+def recommend_history():
+    try:
+        # Fetch user data
+        user_data = get_user_data(request.user_id)
+        if not user_data:
+            return jsonify({
+                'status': False,
+                'message': 'User not found'
+            }), 404
+
+        if not user_data.get('purchase_history'):
+            return jsonify({
+                'status': False,
+                'message': 'Purchase history is required for recommendations'
+            }), 400
+
+        today_date = datetime.today().date()  # Get today's date
+
+        # Extract relevant teams from purchase history
+        relevant_teams = {team.strip().lower() for purchase in user_data['purchase_history']
+                          for team in [purchase['home_team'], purchase['away_team']]}
+
+        recommendations = []
+
+        if USE_DUMMY:
+            # Generate recommendations from dummy data
+            for _, match in dataset.iterrows():
+                match_date = None
+                try:
+                    match_date = datetime.strptime(match['Tanggal'], '%d/%m/%Y').date()
+                except ValueError:
+                    try:
+                        match_date = datetime.strptime(match['Tanggal'], '%d-%m-%Y').date()
+                    except ValueError:
+                        continue
+
+                # Convert team names to lowercase for case-insensitive matching
+                home_team = match['Home'].strip().lower()
+                away_team = match['Away'].strip().lower()
+
+                if (home_team in relevant_teams or away_team in relevant_teams) and match_date >= today_date:
+                    recommendations.append(format_match_recommendation(match))
+
+        else:
+            # Use the prediction model to generate recommendations
+            predictions = model_history.predict([request.user_id])
+            for match in process_predictions(predictions):
+                match_date = None
+                try:
+                    match_date = datetime.strptime(match['tanggal'], '%d/%m/%Y').date()
+                except ValueError:
+                    try:
+                        match_date = datetime.strptime(match['tanggal'], '%d-%m-%Y').date()
+                    except ValueError:
+                        continue
+
+                if match_date >= today_date:
+                    recommendations.append(match)
+
+        # Limit to top 10 recommendations
+        recommendations = recommendations[:10]
+
+        return jsonify({
+            'status': True,
+            'message': 'Recommendations retrieved successfully',
+            'data': recommendations
+        }), 200
+
+    except Exception as e:
+        # Log and return the error
+        print(f"Recommendation error: {e}")
+        return jsonify({
+            'status': False,
+            'message': 'An error occurred while retrieving recommendations',
+            'error': str(e)
         }), 500
 
 @app.route('/api/users/<user_id>/profile-picture', methods=['GET', 'POST', 'PUT', 'DELETE'])
@@ -843,5 +978,5 @@ def reset_password():
             'message': str(e)
         }), 500
 
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ == "__main__":
+  app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
