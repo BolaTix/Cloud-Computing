@@ -14,6 +14,8 @@ import secrets
 from google.cloud import storage
 import uuid
 from werkzeug.utils import secure_filename
+import json
+from google.oauth2 import service_account
 
 # Load environment variables and initialize app
 load_dotenv()
@@ -25,16 +27,18 @@ if not os.getenv('SECRET_KEY'):
     with open('.env', 'a') as f:
         f.write(f"\nSECRET_KEY={app.config['SECRET_KEY']}")
 
-# Initialize Firebase
-try:
-    firebase_admin.initialize_app(options={'projectId': 'bolatix-test'})
-except Exception:
+# Initialize Firebase Admin
+if not firebase_admin._apps:
     cred = credentials.Certificate('serviceAccountKey.json')
     firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 # Initialize Google Cloud Storage client
-storage_client = storage.Client(project='bolatix-test')
+cred_dict = json.load(open('serviceAccountKey.json'))
+storage_client = storage.Client(
+    project='bolatix',
+    credentials=service_account.Credentials.from_service_account_info(cred_dict)
+)
 BUCKET_NAME = 'bolatix-user-profiles'
 bucket = storage_client.bucket(BUCKET_NAME)
 
@@ -44,24 +48,44 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def upload_profile_picture(file, user_id):
-    if not file or not allowed_file(file.filename):
-        return None
+    try:
+        if not file or not allowed_file(file.filename):
+            print(f"File validation failed: {file.filename if file else 'No file'}")
+            return None
         
-    # Create a unique filename
-    original_extension = file.filename.rsplit('.', 1)[1].lower()
-    filename = f"profile_pictures/{user_id}/{str(uuid.uuid4())}.{original_extension}"
-    
-    # Upload to Google Cloud Storage
-    blob = bucket.blob(filename)
-    blob.upload_from_string(
-        file.read(),
-        content_type=file.content_type
-    )
-    
-    # Make the blob publicly readable
-    blob.make_public()
-    
-    return blob.public_url
+        # Delete existing profile pictures for this user
+        blobs = bucket.list_blobs(prefix=f"profile_pictures/{user_id}/")
+        for blob in blobs:
+            print(f"Deleting existing profile picture: {blob.name}")
+            blob.delete()
+        
+        # Create a unique filename
+        original_extension = file.filename.rsplit('.', 1)[1].lower()
+        filename = f"profile_pictures/{user_id}/{str(uuid.uuid4())}.{original_extension}"
+        print(f"Attempting to upload to: {filename}")
+        
+        # Upload to Google Cloud Storage
+        blob = bucket.blob(filename)
+        print(f"Created blob: {blob.name}")
+        
+        file_content = file.read()
+        print(f"Read file content, size: {len(file_content)} bytes")
+        
+        blob.upload_from_string(
+            file_content,
+            content_type=file.content_type
+        )
+        print("Upload completed")
+        
+        blob.make_public()
+        
+        public_url = blob.public_url
+        print(f"Generated public URL: {public_url}")
+        
+        return public_url
+    except Exception as e:
+        print(f"Upload error: {str(e)}")
+        raise
 
 # Model and dataset paths
 HISTORY_MODEL_PATH = "models/history.h5"
@@ -559,83 +583,134 @@ def recommend():
             'message': str(e)
         }), 500
 
-@app.route('/api/users/<user_id>/profile-picture', methods=['POST'])
+@app.route('/api/users/<user_id>/profile-picture', methods=['GET', 'POST', 'PUT', 'DELETE'])
 @verify_token
-def update_profile_picture(user_id):
-    try:
-        if request.user_id != user_id:
-            return jsonify({
-                'status': False,
-                'message': 'Unauthorized access'
-            }), 403
+def manage_profile_picture(user_id):
+    if request.user_id != user_id:
+        return jsonify({'status': False, 'message': 'Unauthorized'}), 403
+
+    # GET: Retrieve profile picture URL
+    if request.method == 'GET':
+        try:
+            user_ref = db.collection('users').document(user_id)
+            user_doc = user_ref.get()
             
-        if 'profile_picture' not in request.files:
-            return jsonify({
-                'status': False,
-                'message': 'No file provided'
-            }), 400
+            if not user_doc.exists:
+                return jsonify({
+                    'status': False, 
+                    'message': 'User not found'
+                }), 404
             
-        file = request.files['profile_picture']
-        if file.filename == '':
+            profile_picture = user_doc.to_dict().get('profile_picture')
+            return jsonify({
+                'status': True,
+                'data': {
+                    'profile_picture_url': profile_picture or None
+                }
+            }), 200
+
+        except Exception as e:
             return jsonify({
                 'status': False,
-                'message': 'No file selected'
-            }), 400
-            
-        if not allowed_file(file.filename):
-            return jsonify({
-                'status': False,
-                'message': f'File type not allowed. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}'
-            }), 400
-            
-        # Get user document
-        user_ref = db.collection('users').document(user_id)
-        user_doc = user_ref.get()
-        
-        if not user_doc.exists:
-            return jsonify({
-                'status': False,
-                'message': 'User not found'
-            }), 404
-            
-        # Delete old profile picture if exists
-        user_data = user_doc.to_dict()
-        old_picture_url = user_data.get('profile_picture')
-        if old_picture_url:
-            try:
-                old_blob_name = old_picture_url.split('/')[-1]
-                old_blob = bucket.blob(f"profile_pictures/{user_id}/{old_blob_name}")
-                old_blob.delete()
-            except Exception:
-                pass
-                
-        # Upload new profile picture
-        picture_url = upload_profile_picture(file, user_id)
-        if not picture_url:
-            return jsonify({
-                'status': False,
-                'message': 'Failed to upload profile picture'
+                'message': str(e)
             }), 500
+
+    # POST/PUT: Upload or Replace Profile Picture
+    if request.method in ['POST', 'PUT']:
+        try:
+            if 'profile_picture' not in request.files:
+                return jsonify({
+                    'status': False,
+                    'message': 'No file provided'
+                }), 400
             
-        # Update user document with new profile picture URL
-        user_ref.update({
-            'profile_picture': picture_url,
-            'updated_at': firestore.SERVER_TIMESTAMP
-        })
-        
-        return jsonify({
-            'status': True,
-            'message': 'Profile picture updated successfully',
-            'data': {
-                'profile_picture_url': picture_url
-            }
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            'status': False,
-            'message': str(e)
-        }), 500
+            file = request.files['profile_picture']
+            
+            # Validate file type
+            if not allowed_file(file.filename):
+                return jsonify({
+                    'status': False,
+                    'message': f'Invalid file type. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'
+                }), 400
+
+            # Delete existing profile picture
+            user_ref = db.collection('users').document(user_id)
+            user_doc = user_ref.get()
+            
+            if user_doc.exists:
+                old_picture_url = user_doc.to_dict().get('profile_picture')
+                if old_picture_url:
+                    try:
+                        # Extract the full blob path, not just the filename
+                        blob_name = f"profile_pictures/{user_id}/{old_picture_url.split('/')[-1]}"
+                        old_blob = bucket.blob(blob_name)
+                        old_blob.delete()
+                        print(f"Deleted blob: {blob_name}")
+                    except Exception as storage_error:
+                        print(f"Error deleting from storage: {storage_error}")
+
+            # Upload new profile picture
+            picture_url = upload_profile_picture(file, user_id)
+            
+            # Update Firestore
+            user_ref.update({
+                'profile_picture': picture_url,
+                'updated_at': firestore.SERVER_TIMESTAMP
+            })
+
+            return jsonify({
+                'status': True,
+                'message': 'Profile picture updated successfully',
+                'data': {
+                    'profile_picture_url': picture_url
+                }
+            }), 200
+
+        except Exception as e:
+            return jsonify({
+                'status': False,
+                'message': str(e)
+            }), 500
+
+    # DELETE: Remove Profile Picture
+    if request.method == 'DELETE':
+        try:
+            user_ref = db.collection('users').document(user_id)
+            user_doc = user_ref.get()
+            
+            if not user_doc.exists:
+                return jsonify({
+                    'status': False, 
+                    'message': 'User not found'
+                }), 404
+            
+            user_data = user_doc.to_dict()
+            old_picture_url = user_data.get('profile_picture')
+            
+            if old_picture_url:
+                try:
+                    blob_name = f"profile_pictures/{user_id}/{old_picture_url.split('/')[-1]}"
+                    old_blob = bucket.blob(blob_name)
+                    old_blob.delete()
+                    print(f"Deleted blob: {blob_name}")
+                except Exception as storage_error:
+                    print(f"Error deleting from storage: {storage_error}")
+                
+                user_ref.update({
+                    'profile_picture': '',
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
+            
+            return jsonify({
+                'status': True,
+                'message': 'Profile picture removed successfully'
+            }), 200
+
+        except Exception as e:
+            return jsonify({
+                'status': False,
+                'message': str(e)
+            }), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
