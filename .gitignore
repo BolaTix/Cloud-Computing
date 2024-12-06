@@ -1,7 +1,7 @@
 .venv/
 venv/
 serviceAccountKey.json
-example.http
+*.http
 *.jpg
 .env
 .env.*

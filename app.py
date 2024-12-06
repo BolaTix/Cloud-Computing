@@ -1,21 +1,24 @@
-from flask import Flask, request, jsonify
-import tensorflow as tf
-import pandas as pd
-import numpy as np
+import json
 import os
+import uuid
+import secrets
+from datetime import datetime, timedelta
+from functools import wraps
+
+import bcrypt
+import jwt
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from dotenv import load_dotenv
+from flask import Flask, request, jsonify
+from flask_mail import Mail, Message
+from google.cloud import storage
+from google.oauth2 import service_account
+from werkzeug.utils import secure_filename
+
 import firebase_admin
 from firebase_admin import credentials, firestore
-from functools import wraps
-import jwt
-from datetime import datetime, timedelta
-import bcrypt
-from dotenv import load_dotenv
-import secrets
-from google.cloud import storage
-import uuid
-from werkzeug.utils import secure_filename
-import json
-from google.oauth2 import service_account
 
 # Load environment variables and initialize app
 load_dotenv()
@@ -26,6 +29,15 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY') or secrets.token_hex(32)
 if not os.getenv('SECRET_KEY'):
     with open('.env', 'a') as f:
         f.write(f"\nSECRET_KEY={app.config['SECRET_KEY']}")
+
+# Mail configuration
+app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER')
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
+app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'True').lower() == 'true'
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+
+mail = Mail(app)
 
 # Initialize Firebase Admin
 if not firebase_admin._apps:
@@ -711,6 +723,125 @@ def manage_profile_picture(user_id):
                 'status': False,
                 'message': str(e)
             }), 500
+
+def send_reset_email(user_email, reset_token):
+    msg = Message('BolaTix Password Reset',
+                  sender=app.config['MAIL_USERNAME'],
+                  recipients=[user_email])
+    msg.body = f'''Your password reset code for BolaTix app:
+
+{reset_token}
+
+Enter this code in the app to reset your password. This code will expire in 1 day.
+
+If you did not request a password reset, please ignore this email and ensure your account is secure.
+'''
+    mail.send(msg)
+
+@app.route('/forgot-password', methods=['POST'])
+def forgot_password():
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        
+        if not email:
+            return jsonify({
+                'status': False,
+                'message': 'Email is required'
+            }), 400
+            
+        # Check if user exists
+        users_ref = db.collection('users')
+        query = users_ref.where('email', '==', email).limit(1).get()
+        
+        if not query:
+            return jsonify({
+                'status': True,
+                'message': 'If an account exists with this email, a password reset link will be sent.'
+            }), 200
+            
+        user = query[0]
+        
+        # Generate reset token
+        reset_token = secrets.token_urlsafe(32)
+        expiration = datetime.utcnow() + timedelta(days=1)
+        
+        # Store reset token in user document
+        user.reference.update({
+            'reset_token': reset_token,
+            'reset_token_exp': expiration
+        })
+        
+        # Send reset email
+        send_reset_email(email, reset_token)
+        
+        return jsonify({
+            'status': True,
+            'message': 'If an account exists with this email, a password reset link will be sent.'
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
+
+@app.route('/reset-password', methods=['POST'])
+def reset_password():
+    try:
+        data = request.get_json()
+        token = data.get('token')
+        new_password = data.get('new_password')
+        
+        if not token or not new_password:
+            return jsonify({
+                'status': False,
+                'message': 'Token and new password are required'
+            }), 400
+            
+        # Find user with this reset token
+        users_ref = db.collection('users')
+        query = users_ref.where('reset_token', '==', token).limit(1).get()
+        
+        if not query:
+            return jsonify({
+                'status': False,
+                'message': 'Invalid or expired reset token'
+            }), 400
+            
+        user = query[0]
+        
+        # Check if token is expired
+        reset_token_exp = user.get('reset_token_exp')
+        if isinstance(reset_token_exp, datetime):
+            # Convert reset_token_exp to UTC naive datetime if it's timezone-aware
+            reset_token_exp = reset_token_exp.replace(tzinfo=None)
+        if datetime.utcnow() > reset_token_exp:
+            return jsonify({
+                'status': False,
+                'message': 'Reset token has expired'
+            }), 400
+            
+        # Hash new password
+        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        # Update password and remove reset token
+        user.reference.update({
+            'password': hashed_password,
+            'reset_token': firestore.DELETE_FIELD,
+            'reset_token_exp': firestore.DELETE_FIELD
+        })
+        
+        return jsonify({
+            'status': True,
+            'message': 'Password has been reset successfully'
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'status': False,
+            'message': str(e)
+        }), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
