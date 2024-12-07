@@ -41,11 +41,10 @@ mail = Mail(app)
 
 # Configure Firebase
 try:
-    if os.getenv('FIREBASE_SERVICE_ACCOUNT'):
-        cred_dict = json.loads(os.getenv('FIREBASE_SERVICE_ACCOUNT'))
-        cred = credentials.Certificate(cred_dict)
-    else:
+    if os.path.exists('serviceAccountKey.json'):
         cred = credentials.Certificate('serviceAccountKey.json')
+    else:
+        cred = credentials.ApplicationDefault()
     
     firebase_admin.initialize_app(cred)
     db = firestore.client()
@@ -53,13 +52,21 @@ except Exception as e:
     print(f"Firebase initialization error: {e}")
 
 # Initialize Google Cloud Storage client
-cred_dict = json.load(open('serviceAccountKey.json'))
-storage_client = storage.Client(
-    project='bolatix',
-    credentials=service_account.Credentials.from_service_account_info(cred_dict)
-)
-BUCKET_NAME = 'bolatix-user-profiles'
-bucket = storage_client.bucket(BUCKET_NAME)
+try:
+    if os.path.exists('serviceAccountKey.json'):
+        cred_dict = json.load(open('serviceAccountKey.json'))
+        storage_credentials = service_account.Credentials.from_service_account_info(cred_dict)
+    else:
+        storage_credentials = service_account.Credentials.from_service_account_info({})
+
+    storage_client = storage.Client(
+        project='bolatix',
+        credentials=storage_credentials
+    )
+    BUCKET_NAME = 'bolatix-user-profiles'
+    bucket = storage_client.bucket(BUCKET_NAME)
+except Exception as e:
+    print(f"Storage client initialization error: {e}")
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 
