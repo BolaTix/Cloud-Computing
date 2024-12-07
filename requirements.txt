@@ -12,6 +12,7 @@ colorama==0.4.6
 cryptography==44.0.0
 firebase-admin==6.6.0
 Flask==3.1.0
+Flask-Mail==0.10.0
 flatbuffers==24.3.25
 gast==0.6.0
 google-api-core==2.23.0
