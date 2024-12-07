@@ -28,6 +28,7 @@ google-resumable-media
 googleapis-common-protos
 grpcio
 grpcio-status
+gunicorn
 h5py
 httplib2
 idna
