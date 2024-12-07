@@ -20,11 +20,11 @@ from werkzeug.utils import secure_filename
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Load environment variables and initialize app
-load_dotenv()
+# Initialize Flask app
 app = Flask(__name__)
+load_dotenv()
 
-# Configure secret key
+# Load environment variables and initialize app
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY') or secrets.token_hex(32)
 if not os.getenv('SECRET_KEY'):
     with open('.env', 'a') as f:
@@ -39,11 +39,18 @@ app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 
 mail = Mail(app)
 
-# Initialize Firebase Admin
-if not firebase_admin._apps:
-    cred = credentials.Certificate('serviceAccountKey.json')
+# Configure Firebase
+try:
+    if os.getenv('FIREBASE_SERVICE_ACCOUNT'):
+        cred_dict = json.loads(os.getenv('FIREBASE_SERVICE_ACCOUNT'))
+        cred = credentials.Certificate(cred_dict)
+    else:
+        cred = credentials.Certificate('serviceAccountKey.json')
+    
     firebase_admin.initialize_app(cred)
-db = firestore.client()
+    db = firestore.client()
+except Exception as e:
+    print(f"Firebase initialization error: {e}")
 
 # Initialize Google Cloud Storage client
 cred_dict = json.load(open('serviceAccountKey.json'))
@@ -978,5 +985,6 @@ def reset_password():
             'message': str(e)
         }), 500
 
-if __name__ == "__main__":
-  app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
