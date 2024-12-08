@@ -115,7 +115,7 @@ def upload_profile_picture(file, user_id):
 
 # Model and dataset paths
 HISTORY_MODEL_PATH = "models/history.h5"
-COLDSTART_MODEL_PATH = "models/cold_start.h5"
+COLDSTART_MODEL_PATH = "models/RekomendasiHistory.h5"
 DATASET_PATH = "data/dataset.csv"
 
 # Check model and dataset availability
@@ -124,6 +124,8 @@ USE_DUMMY = not all(os.path.exists(path) for path in [HISTORY_MODEL_PATH, COLDST
 # Load dataset globally
 try:
     dataset = pd.read_csv(DATASET_PATH)
+    dataset['Score tim home'] = dataset['Score tim home'].fillna(0).astype(int)
+    dataset['Score tim away'] = dataset['Score tim away'].fillna(0).astype(int)
 except Exception as e:
     print(f"Error loading dataset: {e}")
     dataset = pd.DataFrame()
@@ -175,17 +177,30 @@ def verify_token(f):
         return f(*args, **kwargs)
     return decorated
 
-def format_match_recommendation(match, action="Consider buying tickets"):
-
-    home_score = match.get('Score Home', 0)  # Default to 0 if column is missing
-    away_score = match.get('Score Away', 0)  # Default to 0 if column is missing
-    
-    # Format the score as "Home Score - Away Score"
-    score = f"{home_score} - {away_score}"
-    
+def format_alldata(match):
     return {
+        "id_match": match['ID Match'],
         "match": match['Match'],
-        "score": score,
+        "home_score": int(match['Score tim home']) if not pd.isna(match['Score tim home']) else 0,
+        "away_score": int(match['Score tim away']) if not pd.isna(match['Score tim away']) else 0,
+        "home_team": match['Home'].strip(),
+        "away_team": match['Away'].strip(),
+        "lokasi": match['Lokasi'],
+        "jam": match['Jam'].rsplit(':', 1)[0],
+        "waktu": match['Waktu'],
+        "stadion": match['Stadion'],
+        "hari": match['Hari'],
+        "tanggal": match['Tanggal'],
+        "tiket_terjual": int(match['Jumlah Tiket Terjual']),
+    }
+
+
+def format_match_recommendation(match, action="Consider buying tickets"):
+    return {
+        "id_match": match['ID Match'],
+        "match": match['Match'],
+        "home_score": int(match['Score tim home']) if not pd.isna(match['Score tim home']) else 0,
+        "away_score": int(match['Score tim away']) if not pd.isna(match['Score tim away']) else 0,
         "home_team": match['Home'].strip(),
         "away_team": match['Away'].strip(),
         "lokasi": match['Lokasi'],
@@ -661,7 +676,6 @@ def recommend_teamfavorite():
             'error': str(e)
         }), 500
 
-
 @app.route('/api/recommend-history', methods=['GET'])
 def recommend_history():
     try:
@@ -747,6 +761,33 @@ def recommend_history():
             'error': str(e)
         }), 500
 
+@app.route('/api/alldata', methods=['GET'])
+def alldata():
+    try:
+        # Pastikan dataset sudah dimuat
+        if dataset.empty:
+            return {
+                "status": False,
+                "message": "Dataset is empty or not loaded"
+            }, 500
+
+        # Format semua data dari dataset
+        all_data = [format_alldata(row) for _, row in dataset.iterrows()]
+
+        return {
+            "status": True,
+            "message": "All data retrieved successfully",
+            "data": all_data
+        }, 200
+
+    except Exception as e:
+        # Log dan kembalikan error dalam struktur JSON
+        print(f"Error retrieving all data: {e}")
+        return {
+            "status": False,
+            "message": "An error occurred while retrieving all data"
+        }, 500
+    
 @app.route('/api/users/<user_id>/profile-picture', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def manage_profile_picture(user_id):
     # GET: Retrieve profile picture URL
