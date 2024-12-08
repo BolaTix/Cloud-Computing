@@ -48,25 +48,24 @@ try:
     
     firebase_admin.initialize_app(cred)
     db = firestore.client()
-except Exception as e:
-    print(f"Firebase initialization error: {e}")
 
-# Initialize Google Cloud Storage client
-try:
+    # Google Cloud Storage initialization
     if os.path.exists('serviceAccountKey.json'):
         cred_dict = json.load(open('serviceAccountKey.json'))
         storage_credentials = service_account.Credentials.from_service_account_info(cred_dict)
     else:
-        storage_credentials = service_account.Credentials.from_service_account_info({})
+        storage_credentials = None
 
     storage_client = storage.Client(
         project='bolatix',
         credentials=storage_credentials
     )
     BUCKET_NAME = 'bolatix-user-profiles'
+    global bucket
     bucket = storage_client.bucket(BUCKET_NAME)
+    print(f"Successfully initialized bucket: {BUCKET_NAME}")
 except Exception as e:
-    print(f"Storage client initialization error: {e}")
+    print(f"Firebase/Storage initialization error: {e}")
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 
