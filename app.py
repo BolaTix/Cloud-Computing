@@ -16,6 +16,7 @@ from flask_mail import Mail, Message
 from google.cloud import storage
 from google.oauth2 import service_account
 from werkzeug.utils import secure_filename
+import requests
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -372,15 +373,8 @@ def logout():
         }), 500
 
 @app.route('/api/users/<user_id>', methods=['GET'])
-@verify_token
 def read_user(user_id):
     try:
-        if request.user_id != user_id:
-            return jsonify({
-                'status': False,
-                'message': 'Unauthorized access'
-            }), 403
-            
         user_data = get_user_data(user_id)
         if not user_data:
             return jsonify({
@@ -402,22 +396,15 @@ def read_user(user_id):
         }), 500
 
 @app.route('/api/users/<user_id>', methods=['PUT'])
-@verify_token
 def update_user(user_id):
     try:
-        if request.user_id != user_id:
-            return jsonify({
-                'status': False,
-                'message': 'Unauthorized access'
-            }), 403
-            
         data = request.json
         if not data:
             return jsonify({
                 'status': False,
                 'message': 'No data provided for update'
             }), 400
-            
+        
         user_ref = db.collection('users').document(user_id)
         user_doc = user_ref.get()
         
@@ -426,7 +413,7 @@ def update_user(user_id):
                 'status': False,
                 'message': 'User not found'
             }), 404
-            
+        
         update_data = {}
         allowed_fields = ['name', 'favorite_team', 'birth_date', 'profile_picture']
         for field in allowed_fields:
@@ -453,22 +440,15 @@ def update_user(user_id):
         }), 500
 
 @app.route('/api/users/<user_id>', methods=['DELETE'])
-@verify_token
 def delete_user(user_id):
     try:
-        if request.user_id != user_id:
-            return jsonify({
-                'status': False,
-                'message': 'Unauthorized access'
-            }), 403
-            
         user_ref = db.collection('users').document(user_id)
         if not user_ref.get().exists:
             return jsonify({
                 'status': False,
                 'message': 'User not found'
             }), 404
-            
+        
         user_ref.delete()
         return jsonify({
             'status': True,
@@ -482,26 +462,19 @@ def delete_user(user_id):
         }), 500
 
 @app.route('/api/users/<user_id>/purchases', methods=['POST'])
-@verify_token
 def add_purchase(user_id):
     try:
-        if request.user_id != user_id:
-            return jsonify({
-                'status': False,
-                'message': 'Unauthorized access'
-            }), 403
-            
         data = request.json
         required_fields = [
             'match_id', 'home_team', 'away_team', 'stadium', 
             'match_date', 'purchase_date', 'ticket_quantity'
         ]
         if not all(field in data for field in required_fields):
-            return jsonify({
-                'status': False,
-                'message': f'Required fields: {", ".join(required_fields)}'
-            }), 400
-            
+                return jsonify({
+                    'status': False,
+                    'message': f'Required fields: {", ".join(required_fields)}'
+                }), 400
+        
         user_ref = db.collection('users').document(user_id)
         user_doc = user_ref.get()
         
@@ -510,7 +483,7 @@ def add_purchase(user_id):
                 'status': False,
                 'message': 'User not found'
             }), 404
-            
+        
         purchase = {
             'match_id': data['match_id'],
             'home_team': data['home_team'],
@@ -538,15 +511,8 @@ def add_purchase(user_id):
         }), 500
 
 @app.route('/api/users/<user_id>/purchases', methods=['GET'])
-@verify_token
 def get_purchase_history(user_id):
     try:
-        if request.user_id != user_id:
-            return jsonify({
-                'status': False,
-                'message': 'Unauthorized access'
-            }), 403
-            
         user_ref = db.collection('users').document(user_id)
         user_doc = user_ref.get()
         
@@ -555,7 +521,7 @@ def get_purchase_history(user_id):
                 'status': False,
                 'message': 'User not found'
             }), 404
-            
+        
         user_data = user_doc.to_dict()
         purchase_history = user_data.get('purchase_history', [])
         
@@ -571,19 +537,51 @@ def get_purchase_history(user_id):
             'message': str(e)
         }), 500
 
+@app.route('/standings', methods=['GET'])
+def get_standings():
+    try:
+        url = 'https://gist.githubusercontent.com/alhifnywahid/223b6d759c75c6e1be7e7c83fe4a3cf6/raw/bolatix-standings.json'
+        response = requests.get(url)
+        response.raise_for_status()
+        
+        standings_data = response.json()
+        
+        return jsonify({
+            'status': True,
+            'message': 'Standings retrieved successfully',
+            'data': standings_data
+        }), 200
+    
+    except requests.RequestException as e:
+        return jsonify({
+            'status': False,
+            'message': f'Error fetching standings: {str(e)}'
+        }), 500
+    except ValueError as e:
+        return jsonify({
+            'status': False,
+            'message': f'Error parsing JSON: {str(e)}'
+        }), 500
+
 @app.route('/api/recommend-teamfavorite', methods=['GET'])
-@verify_token
 def recommend_teamfavorite():
     try:
+        user_id = request.args.get('user_id')
+        if not user_id:
+            return jsonify({
+                'status': False,
+                'message': 'User ID is required'
+            }), 400
+        
         # Fetch user data
-        user_data = get_user_data(request.user_id)
+        user_data = get_user_data(user_id)
         if not user_data:
             return jsonify({
                 'status': False,
                 'message': 'User not found'
             }), 404
 
-        today_date = datetime.today().date()  # Get today's date
+        today_date = datetime.today().date()
 
         # Dummy data processing
         if USE_DUMMY:
@@ -619,7 +617,7 @@ def recommend_teamfavorite():
         else:
             # Predict recommendations based on user data
             if user_data.get('purchase_history'):
-                predictions = model_history.predict([request.user_id])
+                predictions = model_history.predict([user_id])
             else:
                 favorite_team = user_data.get('favorite_team')
                 if not favorite_team:
@@ -665,11 +663,17 @@ def recommend_teamfavorite():
 
 
 @app.route('/api/recommend-history', methods=['GET'])
-@verify_token
 def recommend_history():
     try:
+        user_id = request.args.get('user_id')
+        if not user_id:
+            return jsonify({
+                'status': False,
+                'message': 'User ID is required'
+            }), 400
+        
         # Fetch user data
-        user_data = get_user_data(request.user_id)
+        user_data = get_user_data(user_id)
         if not user_data:
             return jsonify({
                 'status': False,
@@ -682,7 +686,7 @@ def recommend_history():
                 'message': 'Purchase history is required for recommendations'
             }), 400
 
-        today_date = datetime.today().date()  # Get today's date
+        today_date = datetime.today().date()
 
         # Extract relevant teams from purchase history
         relevant_teams = {team.strip().lower() for purchase in user_data['purchase_history']
@@ -711,7 +715,7 @@ def recommend_history():
 
         else:
             # Use the prediction model to generate recommendations
-            predictions = model_history.predict([request.user_id])
+            predictions = model_history.predict([user_id])
             for match in process_predictions(predictions):
                 match_date = None
                 try:
@@ -744,11 +748,7 @@ def recommend_history():
         }), 500
 
 @app.route('/api/users/<user_id>/profile-picture', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@verify_token
 def manage_profile_picture(user_id):
-    if request.user_id != user_id:
-        return jsonify({'status': False, 'message': 'Unauthorized'}), 403
-
     # GET: Retrieve profile picture URL
     if request.method == 'GET':
         try:
