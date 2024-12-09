@@ -4,7 +4,6 @@ import uuid
 import secrets
 from datetime import datetime, timedelta
 from functools import wraps
-
 import bcrypt
 import jwt
 import numpy as np
@@ -17,11 +16,10 @@ from google.cloud import storage
 from google.oauth2 import service_account
 from werkzeug.utils import secure_filename
 import requests
-
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Initialize Flask app
+# Initialize Flask
 app = Flask(__name__)
 load_dotenv()
 
@@ -113,10 +111,42 @@ def upload_profile_picture(file, user_id):
         print(f"Upload error: {str(e)}")
         raise
 
-# Model and dataset paths
-HISTORY_MODEL_PATH = "models/RekomendasiHistory.h5"
+def download_blob(bucket_name, source_blob_name, destination_file_name):
+    """Downloads a blob from the bucket."""
+    try:
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(source_blob_name)
+        blob.download_to_filename(destination_file_name)
+        print(f"Downloaded {source_blob_name} to {destination_file_name}.")
+    except Exception as e:
+        print(f"Error downloading file: {e}")
+        raise
+
+# Load models and dataset from the bucket
+HISTORY_MODEL_PATH = "models/history.h5"
 COLDSTART_MODEL_PATH = "models/cold_start.h5"
 DATASET_PATH = "data/dataset.csv"
+
+LOCAL_HISTORY_MODEL = "/tmp/history.h5"
+LOCAL_COLDSTART_MODEL = "/tmp/cold_start.h5"
+LOCAL_DATASET = "/tmp/dataset.csv"
+
+# Download models and dataset
+try:
+    download_blob(BUCKET_NAME, HISTORY_MODEL_PATH, LOCAL_HISTORY_MODEL)
+    download_blob(BUCKET_NAME, COLDSTART_MODEL_PATH, LOCAL_COLDSTART_MODEL)
+    download_blob(BUCKET_NAME, DATASET_PATH, LOCAL_DATASET)
+
+    # Load models and dataset
+    model_history = tf.keras.models.load_model(LOCAL_HISTORY_MODEL)
+    model_coldstart = tf.keras.models.load_model(LOCAL_COLDSTART_MODEL)
+    dataset = pd.read_csv(LOCAL_DATASET)
+
+    print("Models and dataset loaded successfully.")
+except Exception as e:
+    print(f"Error loading resources: {e}")
+    model_history, model_coldstart, dataset = None, None, None
 
 # Check model and dataset availability
 USE_DUMMY = not all(os.path.exists(path) for path in [HISTORY_MODEL_PATH, COLDSTART_MODEL_PATH, DATASET_PATH])
@@ -193,7 +223,6 @@ def format_alldata(match):
         "tanggal": match['Tanggal'],
         "tiket_terjual": int(match['Jumlah Tiket Terjual']),
     }
-
 
 def format_match_recommendation(match, action="Consider buying tickets"):
     return {
@@ -552,7 +581,7 @@ def get_purchase_history(user_id):
             'message': str(e)
         }), 500
 
-@app.route('/standings', methods=['GET'])
+@app.route('/api/standings', methods=['GET'])
 def get_standings():
     try:
         url = 'https://gist.githubusercontent.com/alhifnywahid/223b6d759c75c6e1be7e7c83fe4a3cf6/raw/bolatix-standings.json'
@@ -668,7 +697,6 @@ def recommend_teamfavorite():
         }), 200
 
     except Exception as e:
-        # Log and return the error
         print(f"Recommendation error: {e}")
         return jsonify({
             'status': False,
@@ -753,7 +781,6 @@ def recommend_history():
         }), 200
 
     except Exception as e:
-        # Log and return the error
         print(f"Recommendation error: {e}")
         return jsonify({
             'status': False,
@@ -764,14 +791,14 @@ def recommend_history():
 @app.route('/api/alldata', methods=['GET'])
 def alldata():
     try:
-        # Pastikan dataset sudah dimuat
+        # Ensure dataset is loaded
         if dataset.empty:
             return {
                 "status": False,
                 "message": "Dataset is empty or not loaded"
             }, 500
 
-        # Format semua data dari dataset
+        # Format all data from the dataset
         all_data = [format_alldata(row) for _, row in dataset.iterrows()]
 
         return {
@@ -781,7 +808,6 @@ def alldata():
         }, 200
 
     except Exception as e:
-        # Log dan kembalikan error dalam struktur JSON
         print(f"Error retrieving all data: {e}")
         return {
             "status": False,
