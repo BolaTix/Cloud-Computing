@@ -114,8 +114,8 @@ def upload_profile_picture(file, user_id):
         raise
 
 # Model and dataset paths
-HISTORY_MODEL_PATH = "models/history.h5"
-COLDSTART_MODEL_PATH = "models/RekomendasiHistory.h5"
+HISTORY_MODEL_PATH = "models/RekomendasiHistory.h5"
+COLDSTART_MODEL_PATH = "models/cold_start.h5"
 DATASET_PATH = "data/dataset.csv"
 
 # Check model and dataset availability
