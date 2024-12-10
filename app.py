@@ -23,7 +23,7 @@ from firebase_admin import credentials, firestore
 app = Flask(__name__)
 load_dotenv()
 
-# Load environment variables and initialize app
+# Load environment variables
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY') or secrets.token_hex(32)
 if not os.getenv('SECRET_KEY'):
     with open('.env', 'a') as f:
@@ -38,7 +38,7 @@ app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
 
 mail = Mail(app)
 
-# Configure Firebase
+# Firebase initialization
 try:
     if os.path.exists('serviceAccountKey.json'):
         cred = credentials.Certificate('serviceAccountKey.json')
@@ -48,7 +48,7 @@ try:
     firebase_admin.initialize_app(cred)
     db = firestore.client()
 
-    # Google Cloud Storage initialization
+    # Cloud Storage initialization
     if os.path.exists('serviceAccountKey.json'):
         cred_dict = json.load(open('serviceAccountKey.json'))
         storage_credentials = service_account.Credentials.from_service_account_info(cred_dict)
@@ -88,7 +88,7 @@ def upload_profile_picture(file, user_id):
         filename = f"profile_pictures/{user_id}/{str(uuid.uuid4())}.{original_extension}"
         print(f"Attempting to upload to: {filename}")
         
-        # Upload to Google Cloud Storage
+        # Upload to Cloud Storage
         blob = bucket.blob(filename)
         print(f"Created blob: {blob.name}")
         
@@ -111,42 +111,31 @@ def upload_profile_picture(file, user_id):
         print(f"Upload error: {str(e)}")
         raise
 
-def download_blob(bucket_name, source_blob_name, destination_file_name):
-    """Downloads a blob from the bucket."""
+def download_from_gcs(bucket_name, blob_path, local_path):
     try:
+        print(f"Attempting to download {blob_path} from bucket {bucket_name} to {local_path}")
         storage_client = storage.Client()
         bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(source_blob_name)
-        blob.download_to_filename(destination_file_name)
-        print(f"Downloaded {source_blob_name} to {destination_file_name}.")
+        blob = bucket.blob(blob_path)
+        blob.download_to_filename(local_path)
+        print(f"Successfully downloaded {blob_path} to {local_path}")
     except Exception as e:
-        print(f"Error downloading file: {e}")
-        raise
+        print(f"Error downloading {blob_path}: {e}")
 
-# Load models and dataset from the bucket
-HISTORY_MODEL_PATH = "models/history.h5"
-COLDSTART_MODEL_PATH = "models/cold_start.h5"
-DATASET_PATH = "data/dataset.csv"
+# Model and dataset paths in Cloud Storage
+HISTORY_MODEL_BLOB_PATH = "models/history.h5"
+COLDSTART_MODEL_BLOB_PATH = "models/cold_start.h5"
+DATASET_BLOB_PATH = "data/dataset.csv"
 
-LOCAL_HISTORY_MODEL = "/tmp/history.h5"
-LOCAL_COLDSTART_MODEL = "/tmp/cold_start.h5"
-LOCAL_DATASET = "/tmp/dataset.csv"
+# Local temporary paths for downloaded files
+HISTORY_MODEL_PATH = "/tmp/history.h5"
+COLDSTART_MODEL_PATH = "/tmp/cold_start.h5"
+DATASET_PATH = "/tmp/dataset.csv"
 
-# Download models and dataset
-try:
-    download_blob(BUCKET_NAME, HISTORY_MODEL_PATH, LOCAL_HISTORY_MODEL)
-    download_blob(BUCKET_NAME, COLDSTART_MODEL_PATH, LOCAL_COLDSTART_MODEL)
-    download_blob(BUCKET_NAME, DATASET_PATH, LOCAL_DATASET)
-
-    # Load models and dataset
-    model_history = tf.keras.models.load_model(LOCAL_HISTORY_MODEL)
-    model_coldstart = tf.keras.models.load_model(LOCAL_COLDSTART_MODEL)
-    dataset = pd.read_csv(LOCAL_DATASET)
-
-    print("Models and dataset loaded successfully.")
-except Exception as e:
-    print(f"Error loading resources: {e}")
-    model_history, model_coldstart, dataset = None, None, None
+# Download files from Cloud Storage before loading
+download_from_gcs(BUCKET_NAME, HISTORY_MODEL_BLOB_PATH, HISTORY_MODEL_PATH)
+download_from_gcs(BUCKET_NAME, COLDSTART_MODEL_BLOB_PATH, COLDSTART_MODEL_PATH)
+download_from_gcs(BUCKET_NAME, DATASET_BLOB_PATH, DATASET_PATH)
 
 # Check model and dataset availability
 USE_DUMMY = not all(os.path.exists(path) for path in [HISTORY_MODEL_PATH, COLDSTART_MODEL_PATH, DATASET_PATH])
@@ -272,7 +261,6 @@ def get_recommendations_new_user(favorite_team):
     return process_predictions(model_coldstart.predict([favorite_team]))
 
 def process_predictions(predictions):
-    """Process ML model prediction results into readable recommendation format"""
     try:
         if dataset.empty:
             return []
@@ -296,7 +284,6 @@ def process_predictions(predictions):
         print(f"Error processing predictions: {e}")
         return []
 
-# API Endpoints
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     try:
@@ -584,7 +571,7 @@ def get_purchase_history(user_id):
 @app.route('/api/standings', methods=['GET'])
 def get_standings():
     try:
-        url = 'https://gist.githubusercontent.com/alhifnywahid/223b6d759c75c6e1be7e7c83fe4a3cf6/raw/bolatix-standings.json'
+        url = 'https://s.id/bolatix-standings'
         response = requests.get(url)
         response.raise_for_status()
         
@@ -627,7 +614,6 @@ def recommend_teamfavorite():
 
         today_date = datetime.today().date()
 
-        # Dummy data processing
         if USE_DUMMY:
             favorite_team = user_data.get('favorite_team', '')
             if not favorite_team:
@@ -687,7 +673,7 @@ def recommend_teamfavorite():
                 if match_date >= today_date:
                     recommendations.append(match)
 
-        # Ensure exactly 10 recommendations or fewer if not enough matches
+        # Limit to top 10 recommendations
         recommendations = recommendations[:10]
 
         return jsonify({
@@ -791,7 +777,7 @@ def recommend_history():
 @app.route('/api/alldata', methods=['GET'])
 def alldata():
     try:
-        # Ensure dataset is loaded
+        # Ensure the dataset is loaded
         if dataset.empty:
             return {
                 "status": False,
@@ -842,7 +828,7 @@ def manage_profile_picture(user_id):
                 'message': str(e)
             }), 500
 
-    # POST/PUT: Upload or Replace Profile Picture
+    # POST/PUT: Upload or replace profile picture
     if request.method in ['POST', 'PUT']:
         try:
             if 'profile_picture' not in request.files:
@@ -899,7 +885,7 @@ def manage_profile_picture(user_id):
                 'message': str(e)
             }), 500
 
-    # DELETE: Remove Profile Picture
+    # DELETE: Remove profile picture
     if request.method == 'DELETE':
         try:
             user_ref = db.collection('users').document(user_id)

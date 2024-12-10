@@ -1,7 +1,6 @@
-.venv/
 venv/
+.venv/
 serviceAccountKey.json
 *.http
 *.jpg
-.env
-.env.*
+*.env
