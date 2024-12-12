@@ -2,6 +2,7 @@
 
 ## 📚 Table of Contents
 
+- [Prerequisites](#-prerequisites)
 - [Authentication](#authentication)
   - [Register](#register)
   - [Login](#login)
@@ -23,6 +24,17 @@
   - [Get Profile Picture](#get-profile-picture)
   - [Upload/Replace Profile Picture](#uploadreplace-profile-picture)
   - [Delete Profile Picture](#delete-profile-picture)
+
+## 📝 Prerequisites
+
+Before you begin, ensure you have met the following requirements:
+
+-   **Git**: Git is required for version control and to clone this repository. You can download and install it from [git-scm.com](https://git-scm.com).
+-   **Python 3.9+**: This project requires Python 3.9 or a higher version. You can download and install it from [python.org](https://www.python.org).
+-   **pip**: pip is the standard package installer for Python. It is used to install and manage the Python packages required for this project. It usually comes bundled with Python installations.
+-   **Firestore**: Firestore is a NoSQL document database built for automatic scaling, high performance, and ease of application development. It is used in this project for storing application data. You need to enable Firestore in your Google Cloud project.
+-   **Cloud Storage**: Google Cloud Storage is used for storing files and media in this project. You need to enable Cloud Storage in your Google Cloud project and create a storage bucket.
+-   **Cloud Run**: Cloud Run is a managed compute platform that enables you to run containers that are invocable via requests or events. This project uses Cloud Run for deployment. You must have an active Google Cloud account and enable Cloud Run in your Google Cloud Console.
 
 ## 🔐 Authentication
 
