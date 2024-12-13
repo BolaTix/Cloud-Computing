@@ -2,6 +2,7 @@
 
 ## 📚 Table of Contents
 
+- [Architecture](#-prerequisites)
 - [Prerequisites](#-prerequisites)
 - [Authentication](#authentication)
   - [Register](#register)
@@ -24,6 +25,10 @@
   - [Get Profile Picture](#get-profile-picture)
   - [Upload/Replace Profile Picture](#uploadreplace-profile-picture)
   - [Delete Profile Picture](#delete-profile-picture)
+
+## ☁️ Architecture
+
+![BolaTix Cloud Architecture](https://github.com/user-attachments/assets/fb011cfe-2e9c-4798-801a-e2a6e3552ce5)
 
 ## 📝 Prerequisites
 
